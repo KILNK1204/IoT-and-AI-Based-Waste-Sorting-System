@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Smart Waste System</title>
+    <style>
+        #classification-result {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: #f8f9fa;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .result-item {
+            margin: 8px 0;
+            font-size: 16px;
+        }
+        .confidence-good { color: #28a745; }
+        .confidence-medium { color: #ffc107; }
+        .confidence-low { color: #dc3545; }
+        #stream {
+            border: 2px solid #007bff;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        #manual-controls {
+            margin: 20px 0;
+            display: none;
+        }
+        #manual-controls button {
+            margin-right: 10px;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #manual-controls button:hover {
+            background-color: #0056b3;
+        }
+        .mode-section {
+            margin: 15px 0;
+            padding: 15px;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+        }
+    </style>
+    <script>
+        const ESP32_IP_CAM = "http://192.168.219.112";
+        const ESP8266_CAM_CONTROLLER_IP = "http://192.168.219.241";
+        const ACTUATOR_CONTROLLER_IP = "http://192.168.219.70";
+        const CLOUD_FUNCTION_URL = "https://trashclassification-849464200647.us-central1.run.app";
+        
+        let refreshInterval;
+        let classificationInterval = null;
+        let lastSentHash = null;
+        let currentMode = 'auto';
+
+        // Camera control functions
+        function updateImage() {
+            fetch(`${ESP32_IP_CAM}/image`)
+                .then(response => response.ok ? response.blob() : Promise.reject())
+                .then(blob => {
+                    const imgURL = URL.createObjectURL(blob);
+                    document.getElementById('stream').src = imgURL;
+                })
+                .catch(() => {
+                    clearInterval(refreshInterval);
+                    refreshInterval = null;
+                });
+        }
+
+        function checkCameraStatus() {
+            fetch(`${ESP32_IP_CAM}/status`)
+                .then(response => response.text())
+                .then(status => {
+                    const wasActive = refreshInterval !== null;
+                    const nowActive = status === 'ACTIVE';
+                    
+                    if (nowActive && !wasActive) {
+                        refreshInterval = setInterval(updateImage, 2000);
+                        updateImage();
+                    } else if (!nowActive && wasActive) {
+                        clearInterval(refreshInterval);
+                        refreshInterval = null;
+                    }
+                    document.getElementById('status').textContent = status;
+                });
+        }
+
+        function handleModeChange(mode) {
+            const manualControls = document.getElementById('manual-controls');
+            currentMode = mode;
+            manualControls.style.display = mode === 'manual' ? 'block' : 'none';
+
+            // Control classification interval
+            if (classificationInterval) {
+                clearInterval(classificationInterval);
+                classificationInterval = null;
+            }
+            
+            if (mode === 'auto') {
+                classificationInterval = setInterval(fetchLatestResult, 2500);
+                fetchLatestResult(); // Immediate update
+            }
+
+            setMode(mode);
+        }
+
+        function setMode(mode) {
+            fetch(`${ESP8266_CAM_CONTROLLER_IP}/setMode?mode=${mode}`)
+                .then(response => response.text())
+                .then(msg => {
+                    console.log("Mode set:", msg);
+                    alert("Mode set to: " + mode);
+                })
+                .catch(console.error);
+        }
+
+        function sendManualCommand(wasteType) {
+            const formData = new FormData();
+            formData.append('message', wasteType);
+            
+            fetch(`${ACTUATOR_CONTROLLER_IP}/waste`, {
+                method: 'POST',
+                body: new URLSearchParams(formData),
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            })
+            .then(response => {
+                if (response.ok) {
+                    console.log('Manual command sent:', wasteType);
+                    alert(`Sent ${wasteType} command to actuator`);
+                }
+            })
+            .catch(console.error);
+        }
+
+        // Classification results handling
+        function updateResultsUI(data) {
+            const classElem = document.getElementById('result-class');
+            const confElem = document.getElementById('result-confidence');
+            const urlElem = document.getElementById('result-url');
+
+            classElem.textContent = data.class || '-';
+            urlElem.textContent = data.image_url || '-';
+
+            if (data.confidence) {
+                const confidence = (data.confidence * 100).toFixed(1);
+                confElem.textContent = `${confidence}%`;
+                confElem.className = confidence >= 70 ? 'confidence-good' :
+                                    confidence >= 50 ? 'confidence-medium' : 'confidence-low';
+            } else {
+                confElem.textContent = '-';
+                confElem.className = '';
+            }
+        }
+
+        function fetchLatestResult() {
+            if (currentMode !== 'auto') return;
+
+            fetch(`${CLOUD_FUNCTION_URL}?latest=true`)
+                .then(response => {
+                    if (!response.ok) throw new Error('Server error');
+                    return response.json();
+                })
+                .then(data => {
+                    if (!data.error) {
+                        updateResultsUI(data);
+                        const currentHash = data.image_url?.split('/').pop().split('.')[0];
+                        
+                        if (currentHash && currentHash !== lastSentHash && data.class) {
+                            const formData = new FormData();
+                            formData.append('message', data.class);
+                            
+                            fetch(`${ACTUATOR_CONTROLLER_IP}/waste`, {
+                                method: 'POST',
+                                body: new URLSearchParams(formData),
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded'
+                                }
+                            })
+                            .then(response => {
+                                if (response.ok) lastSentHash = currentHash;
+                            });
+                        }
+                    }
+                })
+                .catch(console.error);
+        }
+
+        // Initialize system
+        setInterval(checkCameraStatus, 2000);
+        window.onload = () => {
+            checkCameraStatus();
+            classificationInterval = setInterval(fetchLatestResult, 2500);
+        };
+    </script>
+</head>
+<body>
+    <h1>Smart Waste Management System</h1>
+    <img id="stream" src="" style="max-width: 640px; height: auto;">
+    <p>Camera status: <span id="status">INITIALIZING...</span></p>
+
+    <div class="mode-section">
+        <label for="modeSelect">Operation Mode:</label>
+        <select id="modeSelect" onchange="handleModeChange(this.value)" style="padding: 5px;">
+            <option value="auto">Auto Classification</option>
+            <option value="manual">Manual Mode</option>
+        </select>
+    </div>
+
+    <div id="manual-controls">
+        <button onclick="sendManualCommand('Recyclable')">Recyclable</button>
+        <button onclick="sendManualCommand('Organic')">Organic</button>
+        <button onclick="sendManualCommand('Non-Recyclable')">Non-Recyclable</button>
+    </div>
+
+    <div id="classification-result">
+        <h2>AI Classification Results</h2>
+        <div class="result-item"><strong>Waste Type:</strong> <span id="result-class">-</span></div>
+        <div class="result-item"><strong>Confidence Level:</strong> <span id="result-confidence">-</span></div>
+        <div class="result-item"><strong>Processed Image:</strong> <span id="result-url">-</span></div>
+    </div>
+</body>
+</html>
