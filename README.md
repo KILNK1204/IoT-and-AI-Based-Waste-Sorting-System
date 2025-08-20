@@ -23,8 +23,8 @@ This project is an AI-powered smart waste sorting system developed as a term pro
 - Google Cloud Storage for image logging
 - MobileNetV2 trash classification model (Recyclable, Organic, Non-Recyclable)
 
-## Watch our system in action (Requires UofT account):  
-📹 [Demo Video](https://play.library.utoronto.ca/watch/f9eee6b63e604408a42305ec975bc442)
+## Watch our system in action:  
+📹 [Demo Video](https://youtu.be/xy-va5kHTJw)
 
 ## Authors
 
